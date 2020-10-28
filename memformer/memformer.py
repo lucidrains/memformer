@@ -44,21 +44,24 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads = 8, causal = False, mask = None):
+    def __init__(self, dim, heads = 8, causal = False):
         super().__init__()
         assert (dim % heads) == 0, 'dimension must be divisible by number of heads'
         self.scale = (dim // heads) ** -0.5
         self.heads = heads
         self.causal = causal
-        self.mask = mask
 
         self.to_q = nn.Linear(dim, dim, bias = False)
         self.to_kv = nn.Linear(dim, dim * 2, bias = False)
         self.to_out = nn.Linear(dim, dim)
 
-    def forward(self, x, context = None, mask = None):
+    def forward(self, x, context = None, mask = None, attend_self = False):
         _, n, _, h, device = *x.shape, self.heads, x.device
-        kv_input = default(context, x)
+
+        if attend_self:
+            kv_input = torch.cat((x, context), dim = 1)
+        else:
+            kv_input = default(context, x)
 
         q = self.to_q(x)
         kv = self.to_kv(kv_input).chunk(2, dim = -1)
@@ -67,8 +70,14 @@ class Attention(nn.Module):
         dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
 
         if self.causal:
-            mask = torch.ones((n, n), device = device).triu_(1).bool()
-            dots.masked_fill_(mask, float('-inf'))
+            causal_mask = torch.ones((n, n), device = device).triu_(1).bool()
+            dots.masked_fill_(causal_mask, float('-inf'))
+            del causal_mask
+
+        if exists(mask):
+            mask = rearrange(mask, 'i j -> () () i j')
+            dots.masked_fill_(~mask, float('-inf'))
+            del mask
 
         attn = dots.softmax(dim = -1)
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
@@ -144,11 +153,12 @@ class Memformer(nn.Module):
             return_logits = True
         )
 
+        self.num_mem = num_memory_slots
         self.memory_slots = nn.Parameter(torch.randn(num_memory_slots, dim))
         self.mem_updater = Attention(dim, heads = heads)
 
     def forward(self, src, tgt, mems = None):
-        b = src.shape[0]
+        b, n, num_mem, device = *src.shape, self.num_mem, src.device
         mems = default(mems, self.memory_slots)
 
         if mems.ndim == 2:
@@ -157,5 +167,9 @@ class Memformer(nn.Module):
         enc = self.encoder(src, context = mems)
         out = self.decoder(tgt, context = enc)
 
-        mems = self.mem_updater(mems, enc)
+        # update memory with attention
+        mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
+        mem_mask = F.pad(mem_mask, (0, n), value = True)
+        mems = self.mem_updater(mems, enc, mask = mem_mask, attend_self = True)
+
         return out, mems
