@@ -21,7 +21,8 @@ model = Memformer(
     dim = 512,
     depth = 2,
     max_seq_len = 1024,
-    num_memory_slots = 128
+    num_memory_slots = 128,
+    num_mem_updates = 2
 )
 
 x1 = torch.randint(0, 256, (1, 1024))

@@ -171,7 +171,16 @@ class TransformerWrapper(nn.Module):
         return self.to_logits(x)
 
 class Memformer(nn.Module):
-    def __init__(self, *, num_tokens, dim, depth, max_seq_len, num_memory_slots, heads = 8):
+    def __init__(
+        self,
+        *,
+        num_tokens,
+        dim,
+        depth,
+        max_seq_len,
+        num_memory_slots,
+        num_mem_updates = 1,
+        heads = 8):
         super().__init__()
 
         self.encoder = TransformerWrapper(
@@ -193,8 +202,10 @@ class Memformer(nn.Module):
         self.num_mem = num_memory_slots
         self.memory_slots = nn.Parameter(torch.randn(num_memory_slots, dim))
 
+        self.num_mem_updates = num_mem_updates
         self.mem_updater = Attention(dim, heads = heads)
         self.gru = nn.GRUCell(dim, dim)
+        self.mem_ff = Residual(PreNorm(dim, FeedForward(dim)))
 
     def forward(self, src, tgt, mems = None):
         b, n, num_mem, device = *src.shape, self.num_mem, src.device
@@ -209,12 +220,17 @@ class Memformer(nn.Module):
         # update memory with attention
         mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
         mem_mask = F.pad(mem_mask, (0, n), value = True)
-        updated_mems = self.mem_updater(mems, enc, mask = mem_mask, attend_self = True)
 
-        next_mems = self.gru(
-            rearrange(updated_mems, 'b n d -> (b n) d'),
-            rearrange(mems, 'b n d -> (b n) d')
-        )
+        for _ in range(self.num_mem_updates):
+            prev_mems = mems
+            updated_mems = self.mem_updater(mems, enc, mask = mem_mask, attend_self = True)
 
-        next_mems = rearrange(next_mems, '(b n) d -> b n d', b = b)
-        return out, next_mems
+            next_mems = self.gru(
+                rearrange(updated_mems, 'b n d -> (b n) d'),
+                rearrange(prev_mems, 'b n d -> (b n) d')
+            )
+
+            mems = rearrange(next_mems, '(b n) d -> b n d', b = b)
+            mems = self.mem_ff(mems)
+
+        return out, mems
