@@ -11,7 +11,7 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
-# classes
+# helper classes
 
 class Residual(nn.Module):
     def __init__(self, fn):
@@ -31,6 +31,31 @@ class PreNorm(nn.Module):
         x = self.norm(x)
         return self.fn(x, **kwargs)
 
+# positional embedding
+
+def rel_shift(t):
+    b, h, i, j, device, dtype = *t.shape, t.device, t.dtype
+    zero_pad = torch.zeros((b, h, i, 1), device = device, dtype = dtype)
+    concatted = torch.cat([zero_pad, t], dim = -1)
+    shifted = concatted.view(b, h, j + 1, i)[:, :, 1:]
+    return shifted.view_as(t)
+
+class SinusoidalEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, x, context_len = 0):
+        n, device = x.shape[1], x.device
+        l = n + context_len
+        t = torch.arange(l - 1, -1, -1, device = device).type_as(self.inv_freq)
+        sinusoid_inp = einsum('i , j -> i j', t, self.inv_freq)
+        emb = torch.cat((sinusoid_inp.sin(), sinusoid_inp.cos()), dim = -1)
+        return emb
+
+# main classes
+
 class FeedForward(nn.Module):
     def __init__(self, dim, mult = 4):
         super().__init__()
@@ -44,19 +69,21 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads = 8, causal = False):
+    def __init__(self, dim, heads = 8, causal = False, rel_pos_emb = False):
         super().__init__()
         assert (dim % heads) == 0, 'dimension must be divisible by number of heads'
-        self.scale = (dim // heads) ** -0.5
+        dim_head = dim // heads
+        self.scale = dim_head ** -0.5
         self.heads = heads
         self.causal = causal
-
-        self.to_q = nn.Linear(dim, dim, bias = False)
-        self.to_kv = nn.Linear(dim, dim * 2, bias = False)
+ 
+        self.to_pos = nn.Linear(dim, dim_head) if rel_pos_emb else None
+        self.to_q = nn.Linear(dim, dim)
+        self.to_kv = nn.Linear(dim, dim * 2)
         self.to_out = nn.Linear(dim, dim)
 
-    def forward(self, x, context = None, mask = None, attend_self = False):
-        _, n, _, h, device = *x.shape, self.heads, x.device
+    def forward(self, x, context = None, pos_emb = None, mask = None, attend_self = False):
+        _, n, _, h, scale, device = *x.shape, self.heads, self.scale, x.device
 
         if attend_self:
             kv_input = torch.cat((x, context), dim = 1)
@@ -67,7 +94,13 @@ class Attention(nn.Module):
         kv = self.to_kv(kv_input).chunk(2, dim = -1)
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, *kv))
-        dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
+        dots = einsum('b h i d, b h j d -> b h i j', q, k) * scale
+
+        if exists(self.to_pos):
+            p = self.to_pos(pos_emb)
+            pos_attn = einsum('b h i d, j d -> b h i j', q, p) * scale
+            pos_attn = rel_shift(pos_attn)
+            dots += pos_attn
 
         if self.causal:
             causal_mask = torch.ones((n, n), device = device).triu_(1).bool()
@@ -87,16 +120,18 @@ class Attention(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, dim, depth, heads = 8):
         super().__init__()
+        self.sinu_emb = SinusoidalEmbedding(dim)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Residual(PreNorm(dim, Attention(dim, heads = heads))),
+                Residual(PreNorm(dim, Attention(dim, heads = heads, rel_pos_emb = True))),
                 Residual(PreNorm(dim, Attention(dim, heads = heads))),
                 Residual(PreNorm(dim, FeedForward(dim)))
             ]))
     def forward(self, x, context = None):
+        pos_emb = self.sinu_emb(x)
         for (self_attn, cross_attn, ff) in self.layers:
-            x = self_attn(x)
+            x = self_attn(x, pos_emb = pos_emb)
             x = cross_attn(x, context = context)
             x = ff(x)
         return x
@@ -104,16 +139,18 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, dim, depth, heads = 8):
         super().__init__()
+        self.sinu_emb = SinusoidalEmbedding(dim)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Residual(PreNorm(dim, Attention(dim, heads = heads, causal = True))),
+                Residual(PreNorm(dim, Attention(dim, heads = heads, causal = True, rel_pos_emb = True))),
                 Residual(PreNorm(dim, Attention(dim, heads = heads))),
                 Residual(PreNorm(dim, FeedForward(dim))),
             ]))
     def forward(self, x, context = None):
+        pos_emb = self.sinu_emb(x)
         for (self_attn, cross_attn, ff) in self.layers:
-            x = self_attn(x)
+            x = self_attn(x, pos_emb = pos_emb)
             x = cross_attn(x, context = context)
             x = ff(x)
         return x
@@ -122,7 +159,6 @@ class TransformerWrapper(nn.Module):
     def __init__(self, *, num_tokens, max_seq_len, dim, layer_blocks, heads = 8, return_logits = True):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
-        self.pos_emb = nn.Embedding(max_seq_len, dim)
         self.layer_blocks = layer_blocks
         self.norm = nn.LayerNorm(dim)
         self.to_logits = nn.Linear(dim, num_tokens) if return_logits else nn.Identity()
@@ -130,7 +166,6 @@ class TransformerWrapper(nn.Module):
     def forward(self, x, **kwargs):
         _, n, device = *x.shape, x.device
         x = self.token_emb(x)
-        x += self.pos_emb(torch.arange(n, device = device))
         x = self.layer_blocks(x, **kwargs)
         x = self.norm(x)
         return self.to_logits(x)
