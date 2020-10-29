@@ -192,7 +192,9 @@ class Memformer(nn.Module):
 
         self.num_mem = num_memory_slots
         self.memory_slots = nn.Parameter(torch.randn(num_memory_slots, dim))
+
         self.mem_updater = Attention(dim, heads = heads)
+        self.gru = nn.GRUCell(dim, dim)
 
     def forward(self, src, tgt, mems = None):
         b, n, num_mem, device = *src.shape, self.num_mem, src.device
@@ -207,6 +209,12 @@ class Memformer(nn.Module):
         # update memory with attention
         mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
         mem_mask = F.pad(mem_mask, (0, n), value = True)
-        mems = self.mem_updater(mems, enc, mask = mem_mask, attend_self = True)
+        updated_mems = self.mem_updater(mems, enc, mask = mem_mask, attend_self = True)
 
-        return out, mems
+        next_mems = self.gru(
+            rearrange(updated_mems, 'b n d -> (b n) d'),
+            rearrange(mems, 'b n d -> (b n) d')
+        )
+
+        next_mems = rearrange(next_mems, '(b n) d -> b n d', b = b)
+        return out, next_mems
