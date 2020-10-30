@@ -234,3 +234,52 @@ class Memformer(nn.Module):
             mems = self.mem_ff(mems)
 
         return out, mems
+
+class MemformerEncoder(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        depth,
+        num_memory_slots,
+        num_mem_updates = 1,
+        heads = 8):
+        super().__init__()
+
+        self.encoder = Encoder(dim, depth, heads)
+
+        self.num_mem = num_memory_slots
+        self.memory_slots = nn.Parameter(torch.randn(num_memory_slots, dim))
+
+        self.num_mem_updates = num_mem_updates
+        self.mem_updater = Attention(dim, heads = heads)
+        self.gru = nn.GRUCell(dim, dim)
+        self.mem_ff = Residual(PreNorm(dim, FeedForward(dim)))
+
+    def forward(self, src, mems = None):
+        b, n, h = src.shape
+        num_mem, device = self.num_mem, src.device
+        mems = default(mems, self.memory_slots)
+
+        if mems.ndim == 2:
+            mems = repeat(mems, 'n d -> b n d', b = b)
+
+        enc = self.encoder(src, context = mems)
+
+        # update memory with attention
+        mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
+        mem_mask = F.pad(mem_mask, (0, n), value = True)
+
+        for _ in range(self.num_mem_updates):
+            prev_mems = mems
+            updated_mems = self.mem_updater(mems, enc, mask = mem_mask, attend_self = True)
+
+            next_mems = self.gru(
+                rearrange(updated_mems, 'b n d -> (b n) d'),
+                rearrange(prev_mems, 'b n d -> (b n) d')
+            )
+
+            mems = rearrange(next_mems, '(b n) d -> b n d', b = b)
+            mems = self.mem_ff(mems)
+
+        return enc, mems
