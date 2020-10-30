@@ -1,6 +1,7 @@
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
+from inspect import isfunction
 from einops import rearrange, repeat
 
 # helpers
@@ -9,7 +10,9 @@ def exists(val):
     return val is not None
 
 def default(val, d):
-    return val if exists(val) else d
+    if exists(val):
+        return val
+    return d() if isfunction(d) else d
 
 # helper classes
 
@@ -82,8 +85,8 @@ class Attention(nn.Module):
         self.to_kv = nn.Linear(dim, dim * 2)
         self.to_out = nn.Linear(dim, dim)
 
-    def forward(self, x, context = None, pos_emb = None, mask = None, attend_self = False):
-        _, n, _, h, scale, device = *x.shape, self.heads, self.scale, x.device
+    def forward(self, x, context = None, pos_emb = None, mask = None, query_mask = None, kv_mask = None, attend_self = False):
+        b, n, _, h, scale, device = *x.shape, self.heads, self.scale, x.device
 
         if attend_self:
             kv_input = torch.cat((x, context), dim = 1)
@@ -107,6 +110,20 @@ class Attention(nn.Module):
             dots.masked_fill_(causal_mask, float('-inf'))
             del causal_mask
 
+        if any(map(exists, (query_mask, kv_mask))):
+            query_mask = default(query_mask, lambda: torch.ones((b, n), device = device).bool())
+
+            if exists(context):
+                kv_mask = default(kv_mask, lambda: torch.ones((b, context.shape[1]), device = device).bool())
+            else:
+                kv_mask = default(kv_mask, query_mask)
+
+            query_mask = rearrange(query_mask, 'b i -> b () i ()')
+            kv_mask = rearrange(kv_mask, 'b j -> b () () j')
+            seq_mask = query_mask * kv_mask
+            dots.masked_fill_(~seq_mask, float('-inf'))
+            del seq_mask
+
         if exists(mask):
             mask = rearrange(mask, 'i j -> () () i j')
             dots.masked_fill_(~mask, float('-inf'))
@@ -128,10 +145,10 @@ class Encoder(nn.Module):
                 Residual(PreNorm(dim, Attention(dim, heads = heads))),
                 Residual(PreNorm(dim, FeedForward(dim)))
             ]))
-    def forward(self, x, context = None):
+    def forward(self, x, context = None, src_mask = None):
         pos_emb = self.sinu_emb(x)
         for (self_attn, cross_attn, ff) in self.layers:
-            x = self_attn(x, pos_emb = pos_emb)
+            x = self_attn(x, pos_emb = pos_emb, query_mask = src_mask)
             x = cross_attn(x, context = context)
             x = ff(x)
         return x
@@ -147,11 +164,11 @@ class Decoder(nn.Module):
                 Residual(PreNorm(dim, Attention(dim, heads = heads))),
                 Residual(PreNorm(dim, FeedForward(dim))),
             ]))
-    def forward(self, x, context = None):
+    def forward(self, x, context = None, src_mask = None, tgt_mask = None):
         pos_emb = self.sinu_emb(x)
         for (self_attn, cross_attn, ff) in self.layers:
-            x = self_attn(x, pos_emb = pos_emb)
-            x = cross_attn(x, context = context)
+            x = self_attn(x, pos_emb = pos_emb, query_mask = src_mask)
+            x = cross_attn(x, context = context, query_mask = src_mask, kv_mask = tgt_mask)
             x = ff(x)
         return x
 
@@ -207,19 +224,23 @@ class Memformer(nn.Module):
         self.gru = nn.GRUCell(dim, dim)
         self.mem_ff = Residual(PreNorm(dim, FeedForward(dim)))
 
-    def forward(self, src, tgt, mems = None):
+    def forward(self, src, tgt, mems = None, src_mask = None, tgt_mask = None):
         b, n, num_mem, device = *src.shape, self.num_mem, src.device
         mems = default(mems, self.memory_slots)
 
         if mems.ndim == 2:
             mems = repeat(mems, 'n d -> b n d', b = b)
 
-        enc = self.encoder(src, context = mems)
-        out = self.decoder(tgt, context = enc)
+        enc = self.encoder(src, context = mems, src_mask = src_mask)
+        out = self.decoder(tgt, context = enc, src_mask = tgt_mask, tgt_mask = src_mask)
 
         # update memory with attention
         mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
         mem_mask = F.pad(mem_mask, (0, n), value = True)
+
+        if exists(src_mask):
+            mem_enc_mask = F.pad(src_mask, (num_mem, 0), value = True)
+            mem_mask &= mem_enc_mask
 
         for _ in range(self.num_mem_updates):
             prev_mems = mems
