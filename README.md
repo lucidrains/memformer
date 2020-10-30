@@ -12,6 +12,8 @@ $ pip install memformer
 
 ## Usage
 
+Full encoder / decoder, as in the paper
+
 ```python
 import torch
 from memformer import Memformer
@@ -33,6 +35,29 @@ y2 = torch.randint(0, 256, (1, 1024))
 
 tgt_out1, mems1 = model(x1, y1) # (1, 1024, 512), (1, 128, 512)
 tgt_out2, mems2 = model(x2, y2, mems = mems1)
+```
+
+Encoder only
+
+```python
+import torch
+from memformer import Memformer
+
+model = Memformer(
+    num_tokens = 256,
+    dim = 512,
+    depth = 2,
+    max_seq_len = 1024,
+    num_memory_slots = 128,
+    num_mem_updates = 2,
+    encoder_only = True       # only use encoder, in which output is encoded output
+)
+
+x1 = torch.randint(0, 256, (1, 1024))
+x2 = torch.randint(0, 256, (1, 1024))
+
+enc1, mems1 = model(x1) # (1, 1024, 512), (1, 128, 512)
+enc2, mems2 = model(x2, mems = mems1)
 ```
 
 ## Citations

@@ -197,7 +197,8 @@ class Memformer(nn.Module):
         max_seq_len,
         num_memory_slots,
         num_mem_updates = 1,
-        heads = 8):
+        heads = 8,
+        encoder_only = False):
         super().__init__()
 
         self.encoder = TransformerWrapper(
@@ -214,7 +215,7 @@ class Memformer(nn.Module):
             max_seq_len = max_seq_len,
             layer_blocks = Decoder(dim, depth, heads),
             return_logits = True
-        )
+        ) if not encoder_only else None
 
         self.num_mem = num_memory_slots
         self.memory_slots = nn.Parameter(torch.randn(num_memory_slots, dim))
@@ -224,7 +225,7 @@ class Memformer(nn.Module):
         self.gru = nn.GRUCell(dim, dim)
         self.mem_ff = Residual(PreNorm(dim, FeedForward(dim)))
 
-    def forward(self, src, tgt, mems = None, src_mask = None, tgt_mask = None):
+    def forward(self, src, tgt = None, mems = None, src_mask = None, tgt_mask = None):
         b, n, num_mem, device = *src.shape, self.num_mem, src.device
         mems = default(mems, self.memory_slots)
 
@@ -232,7 +233,12 @@ class Memformer(nn.Module):
             mems = repeat(mems, 'n d -> b n d', b = b)
 
         enc = self.encoder(src, context = mems, src_mask = src_mask)
-        out = self.decoder(tgt, context = enc, src_mask = tgt_mask, tgt_mask = src_mask)
+
+        if exists(self.decoder):
+            assert exists(tgt), 'target sequence must be given if using full encoder / decoder memformer'
+            out = self.decoder(tgt, context = enc, src_mask = tgt_mask, tgt_mask = src_mask)
+        else:
+            out = enc
 
         # update memory with attention
         mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
