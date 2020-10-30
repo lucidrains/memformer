@@ -125,7 +125,7 @@ class Attention(nn.Module):
             del seq_mask
 
         if exists(mask):
-            mask = rearrange(mask, 'i j -> () () i j')
+            mask = rearrange(mask, 'b i j -> b () i j')
             dots.masked_fill_(~mask, float('-inf'))
             del mask
 
@@ -242,9 +242,11 @@ class Memformer(nn.Module):
 
         # update memory with attention
         mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
+        mem_mask = repeat(mem_mask, 'i j -> b i j', b = b)
         mem_mask = F.pad(mem_mask, (0, n), value = True)
 
         if exists(src_mask):
+            src_mask = rearrange(src_mask, 'b j -> b () j')
             mem_enc_mask = F.pad(src_mask, (num_mem, 0), value = True)
             mem_mask &= mem_enc_mask
 
