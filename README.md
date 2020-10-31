@@ -2,7 +2,7 @@
 
 ## Memformer - Pytorch (wip)
 
-Implementation of Memformer, a Memory-augmented Transformer, in Pytorch. It includes memory slots, which are updated with attention, learned efficiently through Memory-Replay BackPropagation (MRBP) through time. The other contribution of this paper is a simplified relative positional encoding that performs better with less parameter and compute.
+Implementation of Memformer, a Memory-augmented Transformer, in Pytorch. It includes memory slots, which are updated with attention, learned efficiently through Memory-Replay BackPropagation (MRBP) through time.
 
 ## Install
 

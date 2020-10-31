@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
@@ -36,26 +37,44 @@ class PreNorm(nn.Module):
 
 # positional embedding
 
-def rel_shift(t):
-    b, h, i, j, device, dtype = *t.shape, t.device, t.dtype
-    zero_pad = torch.zeros((b, h, i, 1), device = device, dtype = dtype)
-    concatted = torch.cat([zero_pad, t], dim = -1)
-    shifted = concatted.view(b, h, j + 1, i)[:, :, 1:]
-    return shifted.view_as(t)
-
-class SinusoidalEmbedding(nn.Module):
-    def __init__(self, dim):
+class RelativePositionBias(nn.Module):
+    def __init__(self, causal = False, num_buckets = 32, max_distance = 128, heads = 8):
         super().__init__()
-        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
+        self.causal = causal
+        self.num_buckets = num_buckets
+        self.max_distance = max_distance
+        self.relative_attention_bias = nn.Embedding(num_buckets, heads)
 
-    def forward(self, x, context_len = 0):
-        n, device = x.shape[1], x.device
-        l = n + context_len
-        t = torch.arange(l - 1, -1, -1, device = device).type_as(self.inv_freq)
-        sinusoid_inp = einsum('i , j -> i j', t, self.inv_freq)
-        emb = torch.cat((sinusoid_inp.sin(), sinusoid_inp.cos()), dim = -1)
-        return emb
+    @staticmethod
+    def _relative_position_bucket(relative_position, causal=True, num_buckets=32, max_distance=128):
+        ret = 0
+        n = -relative_position
+        if causal:
+            num_buckets //= 2
+            ret += (n < 0).long() * num_buckets
+            n = torch.abs(n)
+        else:
+            n = torch.max(n, torch.zeros_like(n))
+
+        max_exact = num_buckets // 2
+        is_small = n < max_exact
+
+        val_if_large = max_exact + (
+            torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)
+        ).long()
+        val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
+
+        ret += torch.where(is_small, n, val_if_large)
+        return ret
+
+    def forward(self, qlen, klen):
+        device = self.relative_attention_bias.weight.device
+        q_pos = torch.arange(qlen, dtype = torch.long, device = device)
+        k_pos = torch.arange(klen, dtype = torch.long, device = device)
+        rel_pos = k_pos[None, :] - q_pos[:, None]
+        rp_bucket = self._relative_position_bucket(rel_pos, causal = self.causal, num_buckets = self.num_buckets)
+        values = self.relative_attention_bias(rp_bucket)
+        return rearrange(values, 'i j h -> () h i j')
 
 # main classes
 
@@ -80,7 +99,6 @@ class Attention(nn.Module):
         self.heads = heads
         self.causal = causal
  
-        self.to_pos = nn.Linear(dim, dim_head) if rel_pos_emb else None
         self.to_q = nn.Linear(dim, dim)
         self.to_kv = nn.Linear(dim, dim * 2)
         self.to_out = nn.Linear(dim, dim)
@@ -99,11 +117,9 @@ class Attention(nn.Module):
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, *kv))
         dots = einsum('b h i d, b h j d -> b h i j', q, k) * scale
 
-        if exists(self.to_pos):
-            p = self.to_pos(pos_emb)
-            pos_attn = einsum('b h i d, j d -> b h i j', q, p) * scale
-            pos_attn = rel_shift(pos_attn)
-            dots += pos_attn
+        if exists(pos_emb):
+            pos_emb_bias = pos_emb(*dots.shape[-2:])
+            dots += pos_emb_bias
 
         if self.causal:
             causal_mask = torch.ones((n, n), device = device).triu_(1).bool()
@@ -137,7 +153,7 @@ class Attention(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, dim, depth, heads = 8):
         super().__init__()
-        self.sinu_emb = SinusoidalEmbedding(dim)
+        self.rel_pos_emb = RelativePositionBias(heads = heads)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
@@ -146,9 +162,8 @@ class Encoder(nn.Module):
                 Residual(PreNorm(dim, FeedForward(dim)))
             ]))
     def forward(self, x, context = None, src_mask = None):
-        pos_emb = self.sinu_emb(x)
         for (self_attn, cross_attn, ff) in self.layers:
-            x = self_attn(x, pos_emb = pos_emb, query_mask = src_mask)
+            x = self_attn(x, pos_emb = self.rel_pos_emb, query_mask = src_mask)
             x = cross_attn(x, context = context)
             x = ff(x)
         return x
@@ -156,7 +171,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, dim, depth, heads = 8):
         super().__init__()
-        self.sinu_emb = SinusoidalEmbedding(dim)
+        self.rel_pos_emb = RelativePositionBias(heads = heads, causal = True)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
@@ -165,9 +180,8 @@ class Decoder(nn.Module):
                 Residual(PreNorm(dim, FeedForward(dim))),
             ]))
     def forward(self, x, context = None, src_mask = None, tgt_mask = None):
-        pos_emb = self.sinu_emb(x)
         for (self_attn, cross_attn, ff) in self.layers:
-            x = self_attn(x, pos_emb = pos_emb, query_mask = src_mask)
+            x = self_attn(x, pos_emb = self.rel_pos_emb, query_mask = src_mask)
             x = cross_attn(x, context = context, query_mask = src_mask, kv_mask = tgt_mask)
             x = ff(x)
         return x
