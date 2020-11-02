@@ -4,6 +4,13 @@ from torch import nn, einsum
 import torch.nn.functional as F
 from inspect import isfunction
 from einops import rearrange, repeat
+from collections import namedtuple
+from memformer.autoregressive_wrapper import AutoregressiveWrapper
+
+# constants
+
+Results = namedtuple('Results', ['enc_out', 'mem', 'dec_out'])
+EncOnlyResults = namedtuple('EncOnlyResults', ['enc_out', 'mem'])
 
 # helpers
 
@@ -190,6 +197,7 @@ class TransformerWrapper(nn.Module):
     def __init__(self, *, num_tokens, max_seq_len, dim, layer_blocks, heads = 8, return_logits = True):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
+        self.max_seq_len = max_seq_len
         self.layer_blocks = layer_blocks
         self.norm = nn.LayerNorm(dim)
         self.to_logits = nn.Linear(dim, num_tokens) if return_logits else nn.Identity()
@@ -231,6 +239,9 @@ class Memformer(nn.Module):
             return_logits = True
         ) if not encoder_only else None
 
+        if exists(self.decoder):
+            self.decoder = AutoregressiveWrapper(self.decoder)
+
         self.num_mem = num_memory_slots
         self.memory_slots = nn.Parameter(torch.randn(num_memory_slots, dim))
 
@@ -248,11 +259,10 @@ class Memformer(nn.Module):
 
         enc = self.encoder(src, context = mems, src_mask = src_mask)
 
-        if exists(self.decoder):
-            assert exists(tgt), 'target sequence must be given if using full encoder / decoder memformer'
-            out = self.decoder(tgt, context = enc, src_mask = tgt_mask, tgt_mask = src_mask)
+        if exists(self.decoder) and exists(tgt):
+            dec_out = self.decoder(tgt, context = enc, src_mask = tgt_mask, tgt_mask = src_mask, return_loss = True)
         else:
-            out = enc
+            dec_out = torch.tensor(0., requires_grad = True, device = device)
 
         # update memory with attention
         mem_mask = torch.eye(num_mem, num_mem, device = device).bool()
@@ -276,4 +286,7 @@ class Memformer(nn.Module):
             mems = rearrange(next_mems, '(b n) d -> b n d', b = b)
             mems = self.mem_ff(mems)
 
-        return out, mems
+        if not exists(self.decoder):
+            return EncOnlyResults(enc, mems)
+
+        return Results(enc, mems, dec_out)

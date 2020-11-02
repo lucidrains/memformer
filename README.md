@@ -27,14 +27,17 @@ model = Memformer(
     num_mem_updates = 2
 )
 
-x1 = torch.randint(0, 256, (1, 1024))
-y1 = torch.randint(0, 256, (1, 1024))
+src_seg_1 = torch.randint(0, 256, (1, 1024))
+src_seg_2 = torch.randint(0, 256, (1, 1024))
+src_seg_3 = torch.randint(0, 256, (1, 1024))
 
-x2 = torch.randint(0, 256, (1, 1024))
-y2 = torch.randint(0, 256, (1, 1024))
+tgt = torch.randint(0, 256, (1, 1024))
 
-tgt_out1, mems1 = model(x1, y1) # (1, 1024, 512), (1, 128, 512)
-tgt_out2, mems2 = model(x2, y2, mems = mems1)
+enc_out1, mems1,    _ = model(src_seg_1) # (1, 1024, 512), (1, 128, 512), _
+enc_out2, mems2,    _ = model(src_seg_2, mems = mems1)
+enc_out3, mems3, loss = model(src_seg_3, tgt, mems = mems2)
+
+loss.backward()
 ```
 
 Encoder only
@@ -53,11 +56,11 @@ model = Memformer(
     encoder_only = True       # only use encoder, in which output is encoded output
 )
 
-x1 = torch.randint(0, 256, (1, 1024))
-x2 = torch.randint(0, 256, (1, 1024))
+src1 = torch.randint(0, 256, (1, 1024))
+src2 = torch.randint(0, 256, (1, 1024))
 
-enc1, mems1 = model(x1) # (1, 1024, 512), (1, 128, 512)
-enc2, mems2 = model(x2, mems = mems1)
+enc1, mems1 = model(src1) # (1, 1024, 512), (1, 128, 512)
+enc2, mems2 = model(src2, mems = mems1)
 ```
 
 ## Citations
