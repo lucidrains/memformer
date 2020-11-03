@@ -1,6 +1,6 @@
 <img src="./memformer.png" width="600px"></img>
 
-## Memformer - Pytorch (wip)
+## Memformer - Pytorch
 
 Implementation of Memformer, a Memory-augmented Transformer, in Pytorch. It includes memory slots, which are updated with attention, learned efficiently through Memory-Replay BackPropagation (MRBP) through time.
 
@@ -61,6 +61,36 @@ src2 = torch.randint(0, 256, (1, 1024))
 
 enc1, mems1 = model(src1) # (1, 1024, 512), (1, 128, 512)
 enc2, mems2 = model(src2, mems = mems1)
+```
+
+Memory Replay Back-Propagation
+
+```python
+import torch
+from memformer import Memformer, memory_replay_backprop
+
+model = Memformer(
+    num_tokens = 256,
+    dim = 512,
+    depth = 2,
+    max_seq_len = 1024,
+    num_memory_slots = 128
+).cuda()
+
+seq = torch.randint(0, 256, (1, 8192)).cuda()
+seq_mask = torch.ones_like(seq).bool().cuda()
+
+tgt = torch.randint(0, 256, (1, 512)).cuda()
+tgt_mask = torch.ones_like(tgt).bool().cuda()
+
+# will automatically split the source sequence to 8 segments
+memory_replay_backprop(
+    model,
+    src = seq,
+    tgt = tgt,
+    src_mask = seq_mask,
+    tgt_mask = tgt_mask
+)
 ```
 
 ## Citations

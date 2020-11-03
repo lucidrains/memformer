@@ -250,12 +250,12 @@ class Memformer(nn.Module):
         self.gru = nn.GRUCell(dim, dim)
         self.mem_ff = Residual(PreNorm(dim, FeedForward(dim)))
 
+    def get_initial_mem(self, batch_size):
+        return repeat(self.memory_slots, 'n d -> b n d', b = batch_size)
+
     def forward(self, src, tgt = None, mems = None, src_mask = None, tgt_mask = None):
         b, n, num_mem, device = *src.shape, self.num_mem, src.device
-        mems = default(mems, self.memory_slots)
-
-        if mems.ndim == 2:
-            mems = repeat(mems, 'n d -> b n d', b = b)
+        mems = default(mems, lambda: self.get_initial_mem(b))
 
         enc = self.encoder(src, context = mems, src_mask = src_mask)
 
