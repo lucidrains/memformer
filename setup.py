@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'memformer',
   packages = find_packages(exclude=['examples']),
-  version = '0.2.1',
+  version = '0.3.0',
   license='MIT',
   description = 'Memformer - Pytorch',
   author = 'Phil Wang',

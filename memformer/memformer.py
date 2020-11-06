@@ -1,6 +1,7 @@
 import math
 import torch
 from torch import nn, einsum
+from functools import partial
 import torch.nn.functional as F
 from inspect import isfunction
 from einops import rearrange, repeat
@@ -21,6 +22,31 @@ def default(val, d):
     if exists(val):
         return val
     return d() if isfunction(d) else d
+
+# keyword argument helpers
+
+def pick_and_pop(keys, d):
+    values = list(map(lambda key: d.pop(key, None), keys))
+    return dict(zip(keys, values))
+
+def group_dict_by_key(cond, d):
+    return_val = [dict(),dict()]
+    for key in d.keys():
+        match = bool(cond(key))
+        ind = int(not match)
+        return_val[ind][key] = d[key]
+    return (*return_val,)
+
+def string_begins_with(prefix, str):
+    return str.startswith(prefix)
+
+def group_by_key_prefix(prefix, d):
+    return group_dict_by_key(partial(string_begins_with, prefix), d)
+
+def group_by_key_prefix_and_trim(prefix, d):
+    kwargs_with_prefix, kwargs = group_dict_by_key(partial(string_begins_with, prefix), d)
+    kwargs_without_prefix = dict(map(lambda x: (x[0][len(prefix):], x[1]), tuple(kwargs_with_prefix.items())))
+    return kwargs_without_prefix, kwargs
 
 # helper classes
 
@@ -53,7 +79,7 @@ class RelativePositionBias(nn.Module):
         self.relative_attention_bias = nn.Embedding(num_buckets, heads)
 
     @staticmethod
-    def _relative_position_bucket(relative_position, causal=True, num_buckets=32, max_distance=128):
+    def _relative_position_bucket(relative_position, causal = True, num_buckets = 32, max_distance = 128):
         ret = 0
         n = -relative_position
         if causal:
@@ -213,30 +239,31 @@ class Memformer(nn.Module):
     def __init__(
         self,
         *,
-        num_tokens,
         dim,
-        depth,
-        max_seq_len,
         num_memory_slots,
         num_mem_updates = 1,
-        heads = 8,
-        encoder_only = False):
+        encoder_only = False,
+        mem_update_attn_heads = 8,
+        **kwargs):
         super().__init__()
+        enc_kwargs, kwargs = group_by_key_prefix_and_trim('enc_', kwargs)
+        dec_kwargs, kwargs = group_by_key_prefix_and_trim('dec_', kwargs)
+        assert 'dim' not in enc_kwargs and 'dim' not in dec_kwargs, 'dimension of either encoder or decoder must be set with `dim` keyword'
+        enc_transformer_kwargs = pick_and_pop(['num_tokens', 'max_seq_len'], enc_kwargs)
+        dec_transformer_kwargs = pick_and_pop(['num_tokens', 'max_seq_len'], dec_kwargs)
 
         self.encoder = TransformerWrapper(
-            num_tokens = num_tokens,
             dim = dim,
-            max_seq_len = max_seq_len,
-            layer_blocks = Encoder(dim, depth, heads),
-            return_logits = False
+            layer_blocks = Encoder(dim = dim, **enc_kwargs),
+            return_logits = False,
+            **enc_transformer_kwargs
         )
 
         self.decoder = TransformerWrapper(
-            num_tokens = num_tokens,
             dim = dim,
-            max_seq_len = max_seq_len,
-            layer_blocks = Decoder(dim, depth, heads),
-            return_logits = True
+            layer_blocks = Decoder(dim = dim, **dec_kwargs),
+            return_logits = True,
+            **dec_transformer_kwargs
         ) if not encoder_only else None
 
         if exists(self.decoder):
@@ -246,7 +273,7 @@ class Memformer(nn.Module):
         self.memory_slots = nn.Parameter(torch.randn(num_memory_slots, dim))
 
         self.num_mem_updates = num_mem_updates
-        self.mem_updater = Attention(dim, heads = heads)
+        self.mem_updater = Attention(dim, heads = mem_update_attn_heads)
         self.gru = nn.GRUCell(dim, dim)
         self.mem_ff = Residual(PreNorm(dim, FeedForward(dim)))
 

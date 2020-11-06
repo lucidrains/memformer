@@ -19,12 +19,16 @@ import torch
 from memformer import Memformer
 
 model = Memformer(
-    num_tokens = 256,
     dim = 512,
-    depth = 2,
-    max_seq_len = 1024,
-    num_memory_slots = 128,
-    num_mem_updates = 2
+    enc_num_tokens = 256,
+    enc_depth = 2,
+    enc_heads = 8,
+    enc_max_seq_len = 1024,
+    dec_num_tokens = 256,
+    dec_depth = 2,
+    dec_heads = 8,
+    dec_max_seq_len = 1024,
+    num_memory_slots = 128
 )
 
 src_seg_1 = torch.randint(0, 256, (1, 1024))
@@ -47,10 +51,11 @@ import torch
 from memformer import Memformer
 
 model = Memformer(
-    num_tokens = 256,
     dim = 512,
-    depth = 2,
-    max_seq_len = 1024,
+    enc_num_tokens = 256,
+    enc_heads = 8,
+    enc_depth = 2,
+    enc_max_seq_len = 1024,
     num_memory_slots = 128,
     num_mem_updates = 2,
     encoder_only = True       # only use encoder, in which output is encoded output
