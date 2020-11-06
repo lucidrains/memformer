@@ -75,11 +75,14 @@ import torch
 from memformer import Memformer, memory_replay_backprop
 
 model = Memformer(
-    num_tokens = 256,
     dim = 512,
-    depth = 2,
-    max_seq_len = 1024,
-    num_memory_slots = 128
+    num_memory_slots = 128,
+    enc_num_tokens = 256,
+    enc_depth = 2,
+    enc_max_seq_len = 1024,
+    dec_num_tokens = 256,
+    dec_depth = 2,
+    dec_max_seq_len = 1024
 ).cuda()
 
 seq = torch.randint(0, 256, (1, 8192)).cuda()
