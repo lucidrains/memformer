@@ -23,6 +23,9 @@ def default(val, d):
         return val
     return d() if isfunction(d) else d
 
+def max_neg_value(tensor):
+    return -torch.finfo(tensor.dtype).max
+
 # keyword argument helpers
 
 def pick_and_pop(keys, d):
@@ -154,9 +157,11 @@ class Attention(nn.Module):
             pos_emb_bias = pos_emb(*dots.shape[-2:])
             dots += pos_emb_bias
 
+        mask_value = max_neg_value(dots)
+
         if self.causal:
             causal_mask = torch.ones((n, n), device = device).triu_(1).bool()
-            dots.masked_fill_(causal_mask, float('-inf'))
+            dots.masked_fill_(causal_mask, mask_value)
             del causal_mask
 
         if any(map(exists, (query_mask, kv_mask))):
@@ -170,12 +175,12 @@ class Attention(nn.Module):
             query_mask = rearrange(query_mask, 'b i -> b () i ()')
             kv_mask = rearrange(kv_mask, 'b j -> b () () j')
             seq_mask = query_mask * kv_mask
-            dots.masked_fill_(~seq_mask, float('-inf'))
+            dots.masked_fill_(~seq_mask, mask_value)
             del seq_mask
 
         if exists(mask):
             mask = rearrange(mask, 'b i j -> b () i j')
-            dots.masked_fill_(~mask, float('-inf'))
+            dots.masked_fill_(~mask, mask_value)
             del mask
 
         attn = dots.softmax(dim = -1)
